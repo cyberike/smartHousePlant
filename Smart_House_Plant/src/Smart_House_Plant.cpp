@@ -1,16 +1,46 @@
-/* 
- * Project: Cloud
- * Author: Isaac
- * Date: 3-18-24
+/* Project: Robo Can
+ * Author: Isaac Martinez
+ * Date: 03-20-24
  * For comprehensive documentation and examples, please visit:
  * https://docs.particle.io/firmware/best-practices/firmware-template/
  */
 
 #include "Particle.h"
-#include "math.h"
-#include "Adafruit_SSD1306.h"
-#include "Air_Quality_Sensor.h"
+#include <Adafruit_MQTT.h>
+#include "Adafruit_MQTT/Adafruit_MQTT_SPARK.h"
+#include "Adafruit_MQTT/Adafruit_MQTT.h"
+#include "credentials.h"
 #include "Adafruit_BME280.h"
+#include "Grove_Air_quality_Sensor.h"
+#include "Adafruit_SSD1306.h"
+#include "Adafruit_GFX.h"
+
+/************ Global State (you don't need to change this!) ***   ***************/ 
+TCPClient TheClient; 
+
+// Setup the MQTT client class by passing in the WiFi client and MQTT server and login details. 
+Adafruit_MQTT_SPARK mqtt(&TheClient,AIO_SERVER,AIO_SERVERPORT,AIO_USERNAME,AIO_KEY); 
+
+/****************************** Feeds ***************************************/ 
+// Setup Feeds to publish or subscribe 
+// Notice MQTT paths for AIO follow the form: <username>/feeds/<feedname> 
+Adafruit_MQTT_Subscribe pumponandoffbutton = Adafruit_MQTT_Subscribe(&mqtt,AIO_USERNAME "/feeds/pumponandoffbutton");
+Adafruit_MQTT_Publish moisturesensor = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/moisturesensor");
+Adafruit_MQTT_Publish dustConcentration = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/dustConcentration");
+Adafruit_MQTT_Publish airQuality = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/airQuality");
+Adafruit_MQTT_Publish temp = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/temp");
+Adafruit_MQTT_Publish _humidity = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/humidity");
+Adafruit_MQTT_Publish _pressure = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/pressure");
+
+/************Declare Variables*************/
+unsigned int last, lastTime;
+float subValue,pubValue;
+int randNumber;
+int onandoffbutton;
+/************Declare Functions*************/
+void MQTT_connect();
+bool MQTT_ping();
+
 
 // Set the system mode to semi-automatic
 SYSTEM_MODE(SEMI_AUTOMATIC);
@@ -23,7 +53,7 @@ const int PUMP_PIN = D16;
 const int BUTTON_PIN = D5;
 
 // Variables
-unsigned long sampletime_ms = 10000; // 10 seconds
+unsigned long sampletime_ms = 120000; // 10 seconds
 unsigned long duration;
 unsigned long starttime;
 unsigned long lowpulseoccupancy = 0;
@@ -32,6 +62,8 @@ float concentration = 0;
 int OLED_RESET = -1;
 int moistureValue;
 String DateTime, TimeOnly;
+
+
 
 // Create an instance of the Air Quality Sensor
 AirQualitySensor airSensor(AIR_QUALITY_SENSOR_PIN);
@@ -45,6 +77,18 @@ Adafruit_BME280 bme;
 void setup() {
   Serial.begin(9600);
   waitFor(Serial.isConnected, 10000);
+
+    // Connect to Internet but not Particle Cloud
+  WiFi.on();
+  WiFi.connect();
+  while(WiFi.connecting()) {
+    Serial.printf(".");
+  }
+  Serial.printf("\n\n");
+
+  //Setup MQTT subscription
+  mqtt.subscribe(&pumponandoffbutton);
+
 
   // Initialize Grove - Dust Sensor
   pinMode(DUST_SENSOR_PIN, INPUT);
@@ -82,6 +126,34 @@ void loop() {
   duration = pulseIn(DUST_SENSOR_PIN, LOW);
   lowpulseoccupancy = lowpulseoccupancy + duration;
 
+   MQTT_connect();
+  MQTT_ping();
+
+
+  // this is our 'wait for incoming subscription packets' busy subloop 
+  Adafruit_MQTT_Subscribe *subscription;
+  while ((subscription = mqtt.readSubscription(100))) {
+    if (subscription == &pumponandoffbutton) {
+      subValue = atoi((char *)pumponandoffbutton.lastread);
+    }
+    if(subValue == HIGH){
+     digitalWrite (D16,HIGH);
+     }
+      else{
+        digitalWrite(D16,LOW);
+        }   
+      
+    }
+  if((millis()-lastTime > 120000)) {
+    if(mqtt.Update()) {
+      // randNumber = random(300);
+      // Serial.printf("The number is = %i \n",randNumber);
+      moisturesensor.publish(moistureValue);
+      // Serial.printf("Publishing %0.2f \n",randNumber); 
+      } 
+    lastTime = millis();
+  }
+
   if ((millis() - starttime) > sampletime_ms) {
     // Calculate dust sensor readings
     ratio = lowpulseoccupancy / (sampletime_ms * 10.0);
@@ -109,17 +181,17 @@ void loop() {
     Serial.printf("Moisture Value: %i\n", moistureValue);
 
     // Publish sensor data to a dashboard
-    Particle.publish("dust_concentration", String(concentration));
-    Particle.publish("air_quality", String(airQualityValue));
-    Particle.publish("temperature", String(temperature));
-    Particle.publish("humidity", String(humidity));
-    Particle.publish("pressure", String(pressure));
-    Particle.publish("moisture", String(moistureValue));
+    dustConcentration.publish(concentration);
+    airQuality.publish(airQualityValue);
+    temp.publish(temperature);
+    _humidity.publish(humidity);
+    _pressure.publish(pressure);
+    moisturesensor.publish(moistureValue);
 
     // Automatically water the plant if soil is too dry
-    if (moistureValue < 500) {
+    if (moistureValue > 4000) {
       digitalWrite(PUMP_PIN, HIGH);
-      delay(2000); // Turn on the pump for 2 seconds
+      delay(500); // Turn on the pump for 2 seconds
       digitalWrite(PUMP_PIN, LOW);
     }
 
@@ -144,10 +216,47 @@ void loop() {
     starttime = millis();
   }
 
-  // Check if the manual watering button is pressed
-  if (digitalRead(BUTTON_PIN) == LOW) {
-    digitalWrite(PUMP_PIN, HIGH);
-    delay(2000); // Turn on the pump for 2 seconds
-    digitalWrite(PUMP_PIN, LOW);
+  // // Check if the manual watering button is pressed
+  //  if (digitalRead(BUTTON_PIN) == LOW) {
+  //    digitalWrite(PUMP_PIN, HIGH);
+  //   delay(500); // Turn on the pump for 2 seconds
+  // digitalWrite(PUMP_PIN, LOW);
   }
+
+// Function to connect and reconnect as necessary to the MQTT server.
+// Should be called in the loop function and it will take care if connecting.
+void MQTT_connect() {
+  int8_t ret;
+ 
+  //Return if already connected.
+  if (mqtt.connected()) {
+    return;
+  }
+ 
+  Serial.print("Connecting to MQTT... ");
+ 
+  while ((ret = mqtt.connect()) != 0) { // connect will return 0 for connected
+       Serial.printf("Error Code %s\n",mqtt.connectErrorString(ret));
+       Serial.printf("Retrying MQTT connection in 5 seconds...\n");
+       mqtt.disconnect();
+       delay(5000);  // wait 5 seconds and try again
+  }
+  Serial.printf("MQTT Connected!\n");
 }
+
+bool MQTT_ping() {
+  static unsigned int last;
+  bool pingStatus;
+
+  if ((millis()-last)>120000) {
+      Serial.printf("Pinging MQTT \n");
+      pingStatus = mqtt.ping();
+      if(!pingStatus) {
+        Serial.printf("Disconnecting \n");
+        mqtt.disconnect();
+      }
+      last = millis();
+  }
+  return pingStatus;
+}
+//74 thru 107 should be added to code to connect and maintain the connection to the adafruit service
